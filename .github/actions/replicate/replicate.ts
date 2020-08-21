@@ -7,6 +7,7 @@ export const BOUNTY_LABELS = ['All For One', 'The Bug Slayer'] as const
 export type BountyType = typeof BOUNTY_LABELS[number]
 type CommentMap = {[K in BountyType]: string}
 export type Issue = {title: string, body: string, labels: string[], bountyType: BountyType}
+type GitHubIssue = { [key: string]: any, number: number, html_url?: string | undefined, body?: string | undefined}
 
 const COMMENT_TASK_LIST_AFO = `## Task List
 - [ ] CodeQL Initial assessment - In case of rejection, please record your decision in the comment below:
@@ -55,11 +56,25 @@ const COMMENT_SCORING = `## Scoring
 
 const COMMENT_FIRST_SUBMISSION = `## :tada: First submission for this user :tada:`
 
-export const generateInternalIssueContentFromPayload = async (payload: WebhookPayload): Promise<Issue | undefined> => {
-    const issue = payload.issue
+const getIssueFromRef = async (issueRef: string | undefined): Promise<GitHubIssue | undefined> => {
+    if(!issueRef)
+        return undefined
+    const token: string | undefined = process.env['GITHUB_TOKEN']
+    if(token === undefined)
+        return undefined
+    const octokit: github.GitHub = new github.GitHub(token)
+    const issueResponse = await octokit.issues.get({
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo,
+        issue_number: Number(issueRef),
+      });
+    return issueResponse.data  
+}
+
+export const generateInternalIssueContentFromPayload = async (payload?: WebhookPayload, issueRef?: string): Promise<Issue | undefined> => {
+    const issue = await getIssueFromRef(issueRef) || payload?.issue
     let result: Issue = {title: 'none', body: 'none', labels: [], bountyType: 'All For One'}
     let bountyIssue: boolean = false
-    let bountyType = ''
 
     if(!issue || !issue.user || !issue.html_url) {
         core.debug("Invalid issue payload")
@@ -71,7 +86,7 @@ export const generateInternalIssueContentFromPayload = async (payload: WebhookPa
         if(!bountyIssue) {
             bountyIssue = BOUNTY_LABELS.includes(element.name)
             if(bountyIssue) {
-                bountyType = element.name
+                result.bountyType = element.name
             }
         }
     });
@@ -81,7 +96,7 @@ export const generateInternalIssueContentFromPayload = async (payload: WebhookPa
         return undefined
     }
 
-    result.title = `[${bountyType}] ${issue.title}`,
+    result.title = `[${result.bountyType}] ${issue.title}`,
     // In order to differentiate immediately the issues from others in the repo
     // And with the current situation, the robot with Read access cannot add labels to the issue
     result.body = `Original external [issue](${issue.html_url})
@@ -115,6 +130,13 @@ export const createInternalIssue = async (payload: WebhookPayload, issue: Issue)
         })        
         internal_ref = issueResponse.data.number
         core.debug(`issue created: ${internal_ref}`)
+        const labelsResponse = await octokit.issues.addLabels( {
+            owner,
+            repo,
+            issue_number: internal_ref,
+            labels: issue.labels
+        })
+        core.debug(`Labels addition result: ${labelsResponse.status} ${(labelsResponse.status==200)? "OK" : "FAILED"}`)
 
         const issueCommentResponse1 = await octokit.issues.createComment({
             owner,
@@ -202,7 +224,7 @@ export const isFirstSubmission = async (payload: WebhookPayload, token : string 
 }
 
 const run = async (): Promise<void> => {
-    const internalIssue = await generateInternalIssueContentFromPayload(github.context.payload)
+    const internalIssue = await generateInternalIssueContentFromPayload(github.context.payload, core.getInput('specific_issue'))
     if(!internalIssue)
         return
 
